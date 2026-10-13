@@ -2,11 +2,13 @@
 ETL Pipeline: Superstore Sales Data to Star Schema Data Warehouse
 ==================================================================
 Script ini melakukan proses Extract, Transform, dan Load (ETL) end-to-end:
-1. Extract  : Membaca dataset penjualan mentah (CSV).
+1. Extract  : Membaca dataset transaksi mentah dari CSV.
 2. Clean    : Menangani Missing Values, Duplikasi Data, dan Anomali Logika Bisnis.
 3. Model    : Membentuk tabel dimensi (dim_customer, dim_product, dim_location,
-              dim_ship_mode, dim_date) dengan Surrogate Keys.
-4. Fact Gen : Membentuk tabel fakta (fact_sales) melalui proses Left Join.
+              dim_ship_mode, dim_date) dengan Surrogate Keys berurut.
+4. Fact Gen : Membentuk dua tabel fakta:
+              - fact_sales          : Granularitas per baris item produk (sales line item)
+              - fact_customer_order : Granularitas per Order ID (order header summary)
 5. Load     : Mengekspor seluruh tabel dimensi dan fakta ke format CSV di dwh_output/.
 
 Author: Data Engineering Expert
@@ -17,7 +19,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-# Konfigurasi logging untuk memantau setiap langkah ETL
+# Konfigurasi logging standar industri untuk memantau siklus hidup ETL
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -31,14 +33,14 @@ logger = logging.getLogger("ETL_Pipeline")
 # ==============================================================================
 def extract_data(file_path: str) -> pd.DataFrame:
     """
-    Mengekstrak data transaksi mentah dari file CSV.
+    Mengekstrak data transaksi mentah dari file CSV sumber.
     """
     logger.info(f"Memulai proses Extract dari: {file_path}")
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File sumber tidak ditemukan di path: {file_path}")
 
     df = pd.read_csv(file_path)
-    logger.info(f"Extract berhasil. Jumlah baris mentah: {len(df):,}, Jumlah kolom: {df.shape[1]}")
+    logger.info(f"Extract berhasil. Baris mentah: {len(df):,}, Kolom: {df.shape[1]}")
     return df
 
 
@@ -51,11 +53,11 @@ def clean_data(
     postal_code_fill: str = "00000"
 ) -> pd.DataFrame:
     """
-    Membersihkan data mentah berdasarkan aturan audit kualitas data:
-    - Missing Values: Customer Name ('Unknown'), Postal Code ('00000'/'Unknown'), Product Name ('Unknown Product')
-    - Duplikasi Data: Drop duplicate seluruh baris dan drop duplicate berdasarkan Row ID
-    - Konversi Tipe Data: Order Date & Ship Date ke datetime
-    - Anomali Bisnis: Mengatasi Ship Date < Order Date (swap atau drop) dan membuang Quantity <= 0
+    Membersihkan data mentah berdasarkan hasil audit spesifik:
+    - Missing Values : Imputasi NULL Customer Name, Product Name, dan Postal Code.
+    - Deduplikasi    : Drop duplicate seluruh baris dan Row ID.
+    - Tipe Data      : Konversi Order Date & Ship Date ke datetime.
+    - Anomali Bisnis : Mengatasi Ship Date < Order Date (swap/drop) dan drop Quantity <= 0.
     """
     logger.info("Memulai proses Data Cleaning (Transform I)...")
     df = df_raw.copy()
@@ -64,7 +66,7 @@ def clean_data(
     # --------------------------------------------------------------------------
     # A. Penanganan Duplikasi Data
     # --------------------------------------------------------------------------
-    # 1. Hapus baris yang identik secara keseluruhan
+    # 1. Hapus duplikasi baris identik secara keseluruhan
     duplicate_rows = df.duplicated().sum()
     df = df.drop_duplicates()
     logger.info(f"[Deduplikasi] Menghapus {duplicate_rows:,} baris duplikat identik.")
@@ -77,17 +79,17 @@ def clean_data(
     # --------------------------------------------------------------------------
     # B. Penanganan Missing Values (NULL)
     # --------------------------------------------------------------------------
-    # 1. Customer Name NULL -> "Unknown"
+    # 1. Kolom 'Customer Name' -> "Unknown"
     null_cust = df["Customer Name"].isna().sum()
     df["Customer Name"] = df["Customer Name"].fillna("Unknown")
     logger.info(f"[Imputasi NULL] Mengisi {null_cust:,} nilai NULL pada 'Customer Name' dengan 'Unknown'.")
 
-    # 2. Product Name NULL -> "Unknown Product"
+    # 2. Kolom 'Product Name' -> "Unknown Product"
     null_prod = df["Product Name"].isna().sum()
     df["Product Name"] = df["Product Name"].fillna("Unknown Product")
     logger.info(f"[Imputasi NULL] Mengisi {null_prod:,} nilai NULL pada 'Product Name' dengan 'Unknown Product'.")
 
-    # 3. Postal Code NULL -> "00000" atau "Unknown", serta standarisasi format string 5-digit
+    # 3. Kolom 'Postal Code' -> Standarisasi format 5-digit string / "00000" / "Unknown"
     null_postal = df["Postal Code"].isna().sum()
     if postal_code_fill == "00000":
         df["Postal Code"] = df["Postal Code"].apply(
@@ -104,45 +106,45 @@ def clean_data(
     # --------------------------------------------------------------------------
     df["Order Date"] = pd.to_datetime(df["Order Date"], errors="coerce")
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
-    logger.info("[Format Tipe Data] 'Order Date' dan 'Ship Date' berhasil dikonversi ke datetime.")
+    logger.info("[Format Tipe Data] 'Order Date' dan 'Ship Date' dikonversi ke tipe datetime.")
 
     # --------------------------------------------------------------------------
     # D. Penanganan Anomali Logika Bisnis
     # --------------------------------------------------------------------------
-    # 1. Tanggal Terbalik (Ship Date < Order Date)
+    # 1. Tanggal Terbalik (Ship Date terjadi sebelum Order Date)
     inverted_mask = df["Ship Date"] < df["Order Date"]
     inverted_count = inverted_mask.sum()
 
     if inverted_count > 0:
         if inverted_date_strategy == "swap":
             logger.info(
-                f"[Anomali Bisnis] Ditemukan {inverted_count:,} baris tanggal terbalik (Ship Date < Order Date). "
+                f"[Anomali Bisnis] Menemukan {inverted_count:,} baris tanggal terbalik. "
                 f"Melakukan swap (menukar nilai Order Date dan Ship Date)."
             )
-            # Menukar nilai Order Date dan Ship Date
+            # Menukar nilai tanggal terbalik untuk memulihkan urutan kronologis transaksi
             df.loc[inverted_mask, ["Order Date", "Ship Date"]] = (
                 df.loc[inverted_mask, ["Ship Date", "Order Date"]].values
             )
         elif inverted_date_strategy == "drop":
             logger.info(
-                f"[Anomali Bisnis] Ditemukan {inverted_count:,} baris tanggal terbalik. "
-                f"Membuang baris data tersebut (drop corrupt rows)."
+                f"[Anomali Bisnis] Menemukan {inverted_count:,} baris tanggal terbalik. "
+                f"Menghapus baris data tersebut (drop corrupt rows)."
             )
             df = df[~inverted_mask].copy()
         else:
-            raise ValueError(f"Strategi inverted_date_strategy '{inverted_date_strategy}' tidak dikenali. Pilih 'swap' atau 'drop'.")
+            raise ValueError(f"Strategi '{inverted_date_strategy}' tidak valid. Pilih 'swap' atau 'drop'.")
 
     # 2. Kuantitas Tidak Valid (Quantity <= 0)
     invalid_qty_count = (df["Quantity"] <= 0).sum()
     df = df[df["Quantity"] > 0].copy()
     logger.info(f"[Anomali Bisnis] Memfilter dan membuang {invalid_qty_count:,} baris dengan Quantity <= 0.")
 
-    logger.info(f"Data Cleaning selesai. Baris sebelum: {initial_rows:,} -> Baris bersih: {len(df):,}")
+    logger.info(f"Data Cleaning selesai. Total baris: {initial_rows:,} -> {len(df):,} baris bersih.")
     return df
 
 
 # ==============================================================================
-# 3. TAHAP MODEL (TRANSFORM II - STAR SCHEMA)
+# 3. TAHAP MODEL (TRANSFORM II - STAR SCHEMA DIMENSIONS)
 # ==============================================================================
 def create_dim_customer(df_clean: pd.DataFrame) -> pd.DataFrame:
     """
@@ -151,7 +153,7 @@ def create_dim_customer(df_clean: pd.DataFrame) -> pd.DataFrame:
     Unique Key : customer_id
     """
     logger.info("Membentuk dim_customer...")
-    # Prioritaskan baris dengan nama valid dibandingkan 'Unknown' jika customer memiliki transaksi lain
+    # Memprioritaskan nama valid jika customer memiliki catatan transaksi lain yang valid
     dim_cust = (
         df_clean[["Customer ID", "Customer Name", "Segment"]]
         .sort_values(
@@ -168,9 +170,9 @@ def create_dim_customer(df_clean: pd.DataFrame) -> pd.DataFrame:
         "Segment": "segment"
     }, inplace=True)
 
-    # Menambahkan Surrogate Key berurut (1..N)
+    # Tambahkan Surrogate Key berurut (1..N)
     dim_cust.insert(0, "customer_key", dim_cust.index + 1)
-    logger.info(f"dim_customer terbentuk dengan {len(dim_cust):,} entitas unik.")
+    logger.info(f"dim_customer selesai: {len(dim_cust):,} entitas unik.")
     return dim_cust
 
 
@@ -181,7 +183,7 @@ def create_dim_product(df_clean: pd.DataFrame) -> pd.DataFrame:
     Unique Key : product_id
     """
     logger.info("Membentuk dim_product...")
-    # Prioritaskan nama produk yang valid daripada 'Unknown Product'
+    # Memprioritaskan nama produk yang valid daripada 'Unknown Product'
     dim_prod = (
         df_clean[["Product ID", "Product Name", "Category", "Sub-Category"]]
         .sort_values(
@@ -199,9 +201,9 @@ def create_dim_product(df_clean: pd.DataFrame) -> pd.DataFrame:
         "Sub-Category": "sub_category"
     }, inplace=True)
 
-    # Menambahkan Surrogate Key berurut (1..N)
+    # Tambahkan Surrogate Key berurut (1..N)
     dim_prod.insert(0, "product_key", dim_prod.index + 1)
-    logger.info(f"dim_product terbentuk dengan {len(dim_prod):,} entitas unik.")
+    logger.info(f"dim_product selesai: {len(dim_prod):,} entitas unik.")
     return dim_prod
 
 
@@ -228,9 +230,9 @@ def create_dim_location(df_clean: pd.DataFrame) -> pd.DataFrame:
         "Postal Code": "postal_code"
     }, inplace=True)
 
-    # Menambahkan Surrogate Key berurut (1..N)
+    # Tambahkan Surrogate Key berurut (1..N)
     dim_loc.insert(0, "location_key", dim_loc.index + 1)
-    logger.info(f"dim_location terbentuk dengan {len(dim_loc):,} lokasi unik.")
+    logger.info(f"dim_location selesai: {len(dim_loc):,} lokasi unik.")
     return dim_loc
 
 
@@ -250,20 +252,20 @@ def create_dim_ship_mode(df_clean: pd.DataFrame) -> pd.DataFrame:
 
     dim_ship.rename(columns={"Ship Mode": "ship_mode"}, inplace=True)
 
-    # Menambahkan Surrogate Key berurut (1..N)
+    # Tambahkan Surrogate Key berurut (1..N)
     dim_ship.insert(0, "ship_mode_key", dim_ship.index + 1)
-    logger.info(f"dim_ship_mode terbentuk dengan {len(dim_ship):,} jenis pengiriman unik.")
+    logger.info(f"dim_ship_mode selesai: {len(dim_ship):,} jenis pengiriman unik.")
     return dim_ship
 
 
 def create_dim_date(df_clean: pd.DataFrame) -> pd.DataFrame:
     """
-    Membentuk tabel dimensi Tanggal/Waktu (dim_date).
-    Digenerate berdasarkan seluruh rentang tanggal unik pada gabungan Order Date dan Ship Date.
+    Membentuk tabel dimensi Waktu/Tanggal (dim_date).
+    Digenerate dari seluruh tanggal unik pada gabungan Order Date dan Ship Date.
     Primary Key: date_key (format integer: YYYYMMDD)
     """
     logger.info("Membentuk dim_date...")
-    # Mengambil seluruh tanggal unik dari gabungan Order Date dan Ship Date
+    # Menggabungkan Order Date dan Ship Date untuk mendapatkan tanggal unik
     all_dates = pd.concat([df_clean["Order Date"], df_clean["Ship Date"]]).dropna().unique()
     unique_dates = pd.Series(all_dates).sort_values().reset_index(drop=True)
 
@@ -276,17 +278,19 @@ def create_dim_date(df_clean: pd.DataFrame) -> pd.DataFrame:
     dim_dt["quarter"] = dim_dt["full_date_dt"].dt.quarter
     dim_dt["year"] = dim_dt["full_date_dt"].dt.year
 
-    # Urutkan dan pilih kolom sesuai spesifikasi
     dim_dt = dim_dt[[
         "date_key", "full_date", "day", "month", "month_name", "quarter", "year"
     ]]
 
-    logger.info(f"dim_date terbentuk dengan {len(dim_dt):,} tanggal unik ({dim_dt['full_date'].min()} s/d {dim_dt['full_date'].max()}).")
+    logger.info(
+        f"dim_date selesai: {len(dim_dt):,} tanggal unik "
+        f"({dim_dt['full_date'].min()} s/d {dim_dt['full_date'].max()})."
+    )
     return dim_dt
 
 
 # ==============================================================================
-# 4. TAHAP FACT TABLE GENERATION
+# 4. TAHAP FACT TABLES GENERATION
 # ==============================================================================
 def create_fact_sales(
     df_clean: pd.DataFrame,
@@ -296,14 +300,14 @@ def create_fact_sales(
     dim_ship_mode: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Membentuk tabel fakta Penjualan (fact_sales).
-    Melakukan mapping Foreign Keys ke Surrogate Keys tabel dimensi melalui Left Join.
-    Primary Key: sales_key (bigint berurut)
+    Membentuk tabel fakta Penjualan Baris Item (fact_sales).
+    Granularitas: Satu baris untuk setiap item penjualan (Row ID).
+    Primary Key : sales_key (bigint berurut)
     """
-    logger.info("Membentuk fact_sales (melakukan left join ke tabel dimensi)...")
+    logger.info("Membentuk fact_sales (Left Join dengan tabel dimensi)...")
     fact = df_clean.copy()
 
-    # Siapkan atribut asli dan natural keys
+    # Siapkan atribut asli dan foreign key tanggal (format YYYYMMDD)
     fact["row_id"] = fact["Row ID"].astype(str)
     fact["order_id"] = fact["Order ID"].astype(str)
     fact["order_date_key"] = fact["Order Date"].dt.strftime("%Y%m%d").astype(int)
@@ -313,7 +317,7 @@ def create_fact_sales(
     fact["discount"] = fact["Discount"].astype(float)
     fact["profit"] = fact["Profit"].astype(float)
 
-    # 1. Join ke dim_customer untuk mendapatkan customer_key
+    # 1. Join ke dim_customer
     fact = fact.merge(
         dim_customer[["customer_id", "customer_key"]],
         left_on="Customer ID",
@@ -321,7 +325,7 @@ def create_fact_sales(
         how="left"
     )
 
-    # 2. Join ke dim_product untuk mendapatkan product_key
+    # 2. Join ke dim_product
     fact = fact.merge(
         dim_product[["product_id", "product_key"]],
         left_on="Product ID",
@@ -329,7 +333,7 @@ def create_fact_sales(
         how="left"
     )
 
-    # 3. Join ke dim_location untuk mendapatkan location_key
+    # 3. Join ke dim_location
     fact = fact.merge(
         dim_location[["country", "region", "state", "city", "postal_code", "location_key"]],
         left_on=["Country", "Region", "State", "City", "Postal Code"],
@@ -337,7 +341,7 @@ def create_fact_sales(
         how="left"
     )
 
-    # 4. Join ke dim_ship_mode untuk mendapatkan ship_mode_key
+    # 4. Join ke dim_ship_mode
     fact = fact.merge(
         dim_ship_mode[["ship_mode", "ship_mode_key"]],
         left_on="Ship Mode",
@@ -345,10 +349,10 @@ def create_fact_sales(
         how="left"
     )
 
-    # Generate Primary Key: sales_key (bigint berurut)
+    # Generate Primary Key: sales_key (bigint)
     fact.insert(0, "sales_key", np.arange(1, len(fact) + 1, dtype=np.int64))
 
-    # Pilih dan susun kolom tabel fakta secara ketat sesuai skema
+    # Susun kolom sesuai skema relasional fact_sales
     fact_columns = [
         "sales_key",
         "row_id",
@@ -366,19 +370,88 @@ def create_fact_sales(
     ]
     fact_sales = fact[fact_columns].copy()
 
-    # Verifikasi integritas relasional (tidak boleh ada Foreign Key yang NULL)
+    # Verifikasi Integritas Relasional
     fk_check = fact_sales[[
         "order_date_key", "ship_date_key", "customer_key",
         "product_key", "location_key", "ship_mode_key"
     ]].isna().sum()
 
     if fk_check.sum() > 0:
-        logger.warning(f"Ditemukan nilai NULL pada Foreign Key fact_sales:\n{fk_check}")
+        logger.warning(f"Terdeteksi nilai NULL pada Foreign Key fact_sales:\n{fk_check}")
     else:
-        logger.info("Verifikasi Integritas Relasional: Seluruh Foreign Key terpetakan sempurna (0 NULLs).")
+        logger.info("Integritas Relasional fact_sales: 100% Foreign Key terpetakan sempurna (0 NULLs).")
 
-    logger.info(f"fact_sales terbentuk dengan {len(fact_sales):,} transaksi.")
+    logger.info(f"fact_sales selesai: {len(fact_sales):,} baris transaksi.")
     return fact_sales
+
+
+def create_fact_customer_order(
+    fact_sales: pd.DataFrame,
+    dim_location: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Membentuk tabel fakta Pesanan Pelanggan (fact_customer_order).
+    Granularitas: Satu baris untuk setiap Order ID.
+    Primary Key : customer_order_key (bigint berurut)
+    Measures    : total_sales, total_quantity, total_profit, total_discount, product_line_count
+    """
+    logger.info("Membentuk fact_customer_order (Agregasi pada tingkat grain Order ID)...")
+
+    # Integrasikan informasi postal_code untuk memprioritaskan alamat valid dibandingkan '00000'
+    fact_with_loc = fact_sales.merge(
+        dim_location[["location_key", "postal_code"]],
+        on="location_key",
+        how="left"
+    )
+
+    # Prioritaskan entri dengan lokasi diketahui (bukan '00000') saat mengambil location_key pesanan
+    fact_with_loc["is_unknown_loc"] = fact_with_loc["postal_code"].isin(["00000", "0", "Unknown"])
+    fact_sorted = fact_with_loc.sort_values(by=["order_id", "is_unknown_loc"])
+
+    # Agregasi data pada tingkat Order ID
+    fact_order = fact_sorted.groupby("order_id", as_index=False).agg(
+        customer_key=("customer_key", "first"),
+        order_date_key=("order_date_key", lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]),
+        location_key=("location_key", "first"),
+        ship_mode_key=("ship_mode_key", "first"),
+        total_sales=("sales", lambda x: np.round(x.sum(), 4)),
+        total_quantity=("quantity", "sum"),
+        total_profit=("profit", lambda x: np.round(x.sum(), 4)),
+        total_discount=("discount", lambda x: np.round(x.sum(), 4)),
+        product_line_count=("sales_key", "count")  # Jumlah baris item produk dalam pesanan
+    )
+
+    # Generate Primary Key: customer_order_key (bigint berurut)
+    fact_order.insert(0, "customer_order_key", np.arange(1, len(fact_order) + 1, dtype=np.int64))
+
+    # Susun kolom secara presisi sesuai spesifikasi skema
+    fact_order_columns = [
+        "customer_order_key",
+        "order_id",
+        "customer_key",
+        "order_date_key",
+        "location_key",
+        "ship_mode_key",
+        "total_sales",
+        "total_quantity",
+        "total_profit",
+        "total_discount",
+        "product_line_count"
+    ]
+    fact_customer_order = fact_order[fact_order_columns].copy()
+
+    # Verifikasi Integritas Relasional
+    fk_check = fact_customer_order[[
+        "customer_key", "order_date_key", "location_key", "ship_mode_key"
+    ]].isna().sum()
+
+    if fk_check.sum() > 0:
+        logger.warning(f"Terdeteksi nilai NULL pada Foreign Key fact_customer_order:\n{fk_check}")
+    else:
+        logger.info("Integritas Relasional fact_customer_order: 100% Foreign Key terpetakan sempurna (0 NULLs).")
+
+    logger.info(f"fact_customer_order selesai: {len(fact_customer_order):,} pesanan unik.")
+    return fact_customer_order
 
 
 # ==============================================================================
@@ -386,7 +459,7 @@ def create_fact_sales(
 # ==============================================================================
 def load_to_dwh(tables: dict, output_dir: str = "dwh_output") -> None:
     """
-    Menyimpan seluruh DataFrame dimensi dan fakta ke file CSV dalam direktori tujuan.
+    Menyimpan seluruh DataFrame dimensi dan fakta menjadi file CSV pada direktori output.
     """
     logger.info(f"Memulai tahap Load ke direktori: '{output_dir}/'...")
     os.makedirs(output_dir, exist_ok=True)
@@ -394,7 +467,7 @@ def load_to_dwh(tables: dict, output_dir: str = "dwh_output") -> None:
     for table_name, df_table in tables.items():
         file_path = os.path.join(output_dir, f"{table_name}.csv")
         df_table.to_csv(file_path, index=False)
-        logger.info(f"  [SAVED] {table_name:<15} -> {file_path} ({len(df_table):,} baris, {df_table.shape[1]} kolom)")
+        logger.info(f"  [SAVED] {table_name:<20} -> {file_path} ({len(df_table):,} baris, {df_table.shape[1]} kolom)")
 
     logger.info("Tahap Load selesai dengan sukses.")
 
@@ -409,7 +482,7 @@ def run_etl_pipeline(
     postal_code_fill: str = "00000"
 ):
     """
-    Fungsi utama orchestrator yang menggerakkan seluruh siklus hidup ETL.
+    Fungsi utama orchestrator yang menjalankan seluruh tahapan ETL.
     """
     logger.info("=" * 70)
     logger.info("MEMULAI PIPELINE ETL SUPERSTORE KE DATA WAREHOUSE (STAR SCHEMA)")
@@ -432,13 +505,20 @@ def run_etl_pipeline(
     dim_ship_mode = create_dim_ship_mode(df_clean)
     dim_date = create_dim_date(df_clean)
 
-    # 4. FACT GENERATION
+    # 4. FACT TABLES GENERATION
+    # 4.1 Tabel Fakta 1: fact_sales (Grain: Item Penjualan / Line Item)
     fact_sales = create_fact_sales(
         df_clean=df_clean,
         dim_customer=dim_customer,
         dim_product=dim_product,
         dim_location=dim_location,
         dim_ship_mode=dim_ship_mode
+    )
+
+    # 4.2 Tabel Fakta 2: fact_customer_order (Grain: Order ID Header)
+    fact_customer_order = create_fact_customer_order(
+        fact_sales=fact_sales,
+        dim_location=dim_location
     )
 
     # 5. LOAD
@@ -448,7 +528,8 @@ def run_etl_pipeline(
         "dim_location": dim_location,
         "dim_ship_mode": dim_ship_mode,
         "dim_date": dim_date,
-        "fact_sales": fact_sales
+        "fact_sales": fact_sales,
+        "fact_customer_order": fact_customer_order
     }
     load_to_dwh(dwh_tables, output_dir=output_dir)
 
@@ -460,5 +541,4 @@ def run_etl_pipeline(
 
 
 if __name__ == "__main__":
-    # Jalankan pipeline
     run_etl_pipeline()
