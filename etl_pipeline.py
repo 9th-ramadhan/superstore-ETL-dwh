@@ -478,29 +478,44 @@ def load_to_mysql(tables: dict, db_connection_string: str) -> None:
     """
     logger.info("Memulai tahap Load langsung ke MySQL...")
     
-    # Membuat koneksi ke database MySQL
+    # 1. Pengecekan driver pymysql
     try:
-        engine = create_engine(db_connection_string)
-        logger.info("Berhasil terhubung ke database.")
-    except Exception as e:
-        logger.error(f"Gagal terhubung ke database: {e}")
+        import pymysql
+    except ImportError:
+        logger.error(
+            "Driver 'pymysql' belum terpasang. Jalankan 'pip install pymysql cryptography' "
+            "untuk mengaktifkan fitur load langsung ke MySQL."
+        )
         return
 
-    # Looping untuk mengirim setiap tabel di dalam dictionary ke database
-    for table_name, df_table in tables.items():
-        logger.info(f"Mengirim tabel {table_name} ke MySQL...")
-        
-        # 'if_exists="replace"' akan menghapus tabel lama dan membuat yang baru tiap kali jalan.
-        # Jika ingin menambah data (incremental), ubah menjadi 'if_exists="append"'.
-        df_table.to_sql(
-            name=table_name,
-            con=engine,
-            if_exists="replace", 
-            index=False
+    # 2. Uji koneksi ke database MySQL
+    try:
+        engine = create_engine(db_connection_string)
+        with engine.connect() as conn:
+            logger.info("Berhasil terhubung ke database MySQL.")
+    except Exception as e:
+        logger.error(f"Gagal terhubung ke database MySQL: {e}")
+        logger.warning(
+            "Tips: Pastikan MySQL Server (misal XAMPP/Wamp/MySQL Service) sedang aktif "
+            "dan database tujuan ('superstore_dwh') sudah dibuat terlebih dahulu."
         )
-        logger.info(f"  [SUCCESS] {table_name:<20} berhasil dimuat ({len(df_table):,} baris)")
+        return
 
-    logger.info("Tahap Load ke MySQL selesai dengan sukses.")
+    # 3. Looping untuk mengirim setiap tabel ke MySQL
+    for table_name, df_table in tables.items():
+        try:
+            logger.info(f"Mengirim tabel {table_name} ke MySQL...")
+            df_table.to_sql(
+                name=table_name,
+                con=engine,
+                if_exists="replace", 
+                index=False
+            )
+            logger.info(f"  [SUCCESS] {table_name:<20} berhasil dimuat ({len(df_table):,} baris)")
+        except Exception as e:
+            logger.error(f"  [FAILED] Gagal memuat tabel {table_name}: {e}")
+
+    logger.info("Tahap Load ke MySQL selesai.")
 
 # ==============================================================================
 # PIPELINE ORCHESTRATOR
@@ -551,8 +566,6 @@ def run_etl_pipeline(
         dim_location=dim_location
     )
 
-    load_to_mysql(dwh_tables, db_connection_string=mysql_conn_str)
-
     # 5. LOAD
     dwh_tables = {
         "dim_customer": dim_customer,
@@ -563,7 +576,15 @@ def run_etl_pipeline(
         "fact_sales": fact_sales,
         "fact_customer_order": fact_customer_order
     }
+    
+    # 5.1 Load ke CSV (DWH Output Directory)
     load_to_dwh(dwh_tables, output_dir=output_dir)
+
+    # 5.2 Load ke MySQL (Opsional, pastikan MySQL aktif & pymysql terpasang)
+    # Ubah load_mysql=True jika ingin langsung memuat data ke MySQL
+    load_mysql = True
+    if load_mysql:
+        load_to_mysql(dwh_tables, db_connection_string="mysql+pymysql://root:@localhost:3306/superstore_dwh")
 
     logger.info("=" * 70)
     logger.info("PIPELINE ETL SELESAI DENGAN SUKSES!")
