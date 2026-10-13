@@ -18,6 +18,7 @@ import os
 import logging
 import numpy as np
 import pandas as pd
+from sqlalchemy import create_engine
 
 # Konfigurasi logging standar industri untuk memantau siklus hidup ETL
 logging.basicConfig(
@@ -471,6 +472,35 @@ def load_to_dwh(tables: dict, output_dir: str = "dwh_output") -> None:
 
     logger.info("Tahap Load selesai dengan sukses.")
 
+def load_to_mysql(tables: dict, db_connection_string: str) -> None:
+    """
+    Menyimpan seluruh DataFrame dimensi dan fakta LANGSUNG ke database MySQL.
+    """
+    logger.info("Memulai tahap Load langsung ke MySQL...")
+    
+    # Membuat koneksi ke database MySQL
+    try:
+        engine = create_engine(db_connection_string)
+        logger.info("Berhasil terhubung ke database.")
+    except Exception as e:
+        logger.error(f"Gagal terhubung ke database: {e}")
+        return
+
+    # Looping untuk mengirim setiap tabel di dalam dictionary ke database
+    for table_name, df_table in tables.items():
+        logger.info(f"Mengirim tabel {table_name} ke MySQL...")
+        
+        # 'if_exists="replace"' akan menghapus tabel lama dan membuat yang baru tiap kali jalan.
+        # Jika ingin menambah data (incremental), ubah menjadi 'if_exists="append"'.
+        df_table.to_sql(
+            name=table_name,
+            con=engine,
+            if_exists="replace", 
+            index=False
+        )
+        logger.info(f"  [SUCCESS] {table_name:<20} berhasil dimuat ({len(df_table):,} baris)")
+
+    logger.info("Tahap Load ke MySQL selesai dengan sukses.")
 
 # ==============================================================================
 # PIPELINE ORCHESTRATOR
@@ -520,6 +550,8 @@ def run_etl_pipeline(
         fact_sales=fact_sales,
         dim_location=dim_location
     )
+
+    load_to_mysql(dwh_tables, db_connection_string=mysql_conn_str)
 
     # 5. LOAD
     dwh_tables = {
