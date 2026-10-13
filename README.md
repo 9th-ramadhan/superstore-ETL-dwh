@@ -23,5 +23,16 @@ dwh_output:
 Grain: satu baris per item pesanan (Row ID)
 Menyimpan metrik penjualan untuk menganalisis total penjualan, kuantitas, diskon, dan keuntungan berdasarkan pelanggan, produk, wilayah, maupun tanggal.
 
+- Total penjualan dan keuntungan berdasarkan tahun atau bulan.
+- Produk dan kategori dengan keuntungan tertinggi.
+- Penjualan menurut segmen pelanggan.
+- Perbandingan penjualan antarwilayah dan kota.
+- Perbandingan penjualan berdasarkan metode pengiriman.
+
 ### Fakta 2 - fact_customer_order
 Grain: satu baris per pelanggan per pesanan (Customer ID + Order ID). Karena satu pesanan dapat berisi beberapa produk, data dari baris-baris produk harus diagregasi terlebih dahulu. Dataset Superstore menyediakan kolom yang diperlukan, seperti Order ID, Customer ID, Order Date, Sales, Quantity, dan Profit.
+
+- Berapa rata-rata nilai penjualan setiap pesanan?
+- Pelanggan mana yang paling sering melakukan pemesanan?
+- Berapa rata-rata keuntungan per pesanan?
+- Apakah pesanan dengan banyak produk menghasilkan keuntungan lebih tinggi?
