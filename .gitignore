@@ -7,3 +7,4 @@ logs/*.log
 dwh_output/*
 
 !dwh_output/.gitkeep
+*.bkp
