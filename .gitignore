@@ -1,0 +1,5 @@
+# Mengabaikan semua file .log di dalam folder logs
+logs/*.log
+
+# Pengecualian: jangan abaikan file .gitkeep
+!logs/.gitkeep
