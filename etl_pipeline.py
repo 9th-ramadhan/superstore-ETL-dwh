@@ -147,126 +147,194 @@ def clean_data(
 # ==============================================================================
 # 3. TAHAP MODEL (TRANSFORM II - STAR SCHEMA DIMENSIONS)
 # ==============================================================================
-def create_dim_customer(df_clean: pd.DataFrame) -> pd.DataFrame:
+# ==============================================================================
+# 3. TAHAP MODEL (TRANSFORM II - INCREMENTAL DIMENSIONAL MODELING)
+# ==============================================================================
+def get_existing_table(table_name: str, output_dir: str = "dwh_output") -> pd.DataFrame | None:
     """
-    Membentuk tabel dimensi Customer (dim_customer).
+    Membaca tabel yang sudah ada di DWH (jika tersedia) untuk mendukung incremental load.
+    """
+    file_path = os.path.join(output_dir, f"{table_name}.csv")
+    if os.path.exists(file_path):
+        try:
+            df = pd.read_csv(file_path)
+            return df
+        except Exception as e:
+            logger.warning(f"Gagal membaca tabel eksisting {table_name}: {e}. Memulai dari awal.")
+            return None
+    return None
+
+
+def create_dim_customer(df_clean: pd.DataFrame, output_dir: str = "dwh_output") -> pd.DataFrame:
+    """
+    Membentuk / Memperbarui tabel dimensi Customer (dim_customer) secara incremental.
     Primary Key: customer_key (Surrogate Key, int berurut)
     Unique Key : customer_id
     """
-    logger.info("Membentuk dim_customer...")
-    # Memprioritaskan nama valid jika customer memiliki catatan transaksi lain yang valid
-    dim_cust = (
+    logger.info("Sinkronisasi dim_customer (Incremental Check)...")
+    existing_dim = get_existing_table("dim_customer", output_dir)
+
+    # Ekstrak entitas customer unik dari batch data saat ini
+    incoming_cust = (
         df_clean[["Customer ID", "Customer Name", "Segment"]]
-        .sort_values(
-            by=["Customer ID", "Customer Name"],
-            key=lambda col: col == "Unknown"
-        )
+        .sort_values(by=["Customer ID", "Customer Name"], key=lambda col: col == "Unknown")
         .drop_duplicates(subset=["Customer ID"], keep="first")
-        .reset_index(drop=True)
+        .rename(columns={
+            "Customer ID": "customer_id",
+            "Customer Name": "customer_name",
+            "Segment": "segment"
+        })
     )
 
-    dim_cust.rename(columns={
-        "Customer ID": "customer_id",
-        "Customer Name": "customer_name",
-        "Segment": "segment"
-    }, inplace=True)
+    if existing_dim is None or existing_dim.empty:
+        # Initial Load: buat key dari 1 s/d N
+        incoming_cust.insert(0, "customer_key", np.arange(1, len(incoming_cust) + 1, dtype=int))
+        logger.info(f"dim_customer (Initial Load): {len(incoming_cust):,} entitas dibuat.")
+        return incoming_cust
+    else:
+        # Incremental Load: cari customer yang belum ada di DWH
+        existing_ids = set(existing_dim["customer_id"].astype(str))
+        new_cust = incoming_cust[~incoming_cust["customer_id"].astype(str).isin(existing_ids)].copy()
 
-    # Tambahkan Surrogate Key berurut (1..N)
-    dim_cust.insert(0, "customer_key", dim_cust.index + 1)
-    logger.info(f"dim_customer selesai: {len(dim_cust):,} entitas unik.")
-    return dim_cust
+        if not new_cust.empty:
+            max_key = int(existing_dim["customer_key"].max())
+            new_cust.insert(0, "customer_key", np.arange(max_key + 1, max_key + 1 + len(new_cust), dtype=int))
+            updated_dim = pd.concat([existing_dim, new_cust], ignore_index=True)
+            logger.info(f"dim_customer (Incremental): Menambahkan {len(new_cust):,} customer baru. Total: {len(updated_dim):,}.")
+            return updated_dim
+        else:
+            logger.info(f"dim_customer (Incremental): Tidak ada customer baru. Total tetap: {len(existing_dim):,}.")
+            return existing_dim
 
 
-def create_dim_product(df_clean: pd.DataFrame) -> pd.DataFrame:
+def create_dim_product(df_clean: pd.DataFrame, output_dir: str = "dwh_output") -> pd.DataFrame:
     """
-    Membentuk tabel dimensi Produk (dim_product).
+    Membentuk / Memperbarui tabel dimensi Produk (dim_product) secara incremental.
     Primary Key: product_key (Surrogate Key, int berurut)
     Unique Key : product_id
     """
-    logger.info("Membentuk dim_product...")
-    # Memprioritaskan nama produk yang valid daripada 'Unknown Product'
-    dim_prod = (
+    logger.info("Sinkronisasi dim_product (Incremental Check)...")
+    existing_dim = get_existing_table("dim_product", output_dir)
+
+    incoming_prod = (
         df_clean[["Product ID", "Product Name", "Category", "Sub-Category"]]
-        .sort_values(
-            by=["Product ID", "Product Name"],
-            key=lambda col: col == "Unknown Product"
-        )
+        .sort_values(by=["Product ID", "Product Name"], key=lambda col: col == "Unknown Product")
         .drop_duplicates(subset=["Product ID"], keep="first")
-        .reset_index(drop=True)
+        .rename(columns={
+            "Product ID": "product_id",
+            "Product Name": "product_name",
+            "Category": "category",
+            "Sub-Category": "sub_category"
+        })
     )
 
-    dim_prod.rename(columns={
-        "Product ID": "product_id",
-        "Product Name": "product_name",
-        "Category": "category",
-        "Sub-Category": "sub_category"
-    }, inplace=True)
+    if existing_dim is None or existing_dim.empty:
+        incoming_prod.insert(0, "product_key", np.arange(1, len(incoming_prod) + 1, dtype=int))
+        logger.info(f"dim_product (Initial Load): {len(incoming_prod):,} entitas dibuat.")
+        return incoming_prod
+    else:
+        existing_ids = set(existing_dim["product_id"].astype(str))
+        new_prod = incoming_prod[~incoming_prod["product_id"].astype(str).isin(existing_ids)].copy()
 
-    # Tambahkan Surrogate Key berurut (1..N)
-    dim_prod.insert(0, "product_key", dim_prod.index + 1)
-    logger.info(f"dim_product selesai: {len(dim_prod):,} entitas unik.")
-    return dim_prod
+        if not new_prod.empty:
+            max_key = int(existing_dim["product_key"].max())
+            new_prod.insert(0, "product_key", np.arange(max_key + 1, max_key + 1 + len(new_prod), dtype=int))
+            updated_dim = pd.concat([existing_dim, new_prod], ignore_index=True)
+            logger.info(f"dim_product (Incremental): Menambahkan {len(new_prod):,} produk baru. Total: {len(updated_dim):,}.")
+            return updated_dim
+        else:
+            logger.info(f"dim_product (Incremental): Tidak ada produk baru. Total tetap: {len(existing_dim):,}.")
+            return existing_dim
 
 
-def create_dim_location(df_clean: pd.DataFrame) -> pd.DataFrame:
+def create_dim_location(df_clean: pd.DataFrame, output_dir: str = "dwh_output") -> pd.DataFrame:
     """
-    Membentuk tabel dimensi Lokasi (dim_location).
+    Membentuk / Memperbarui tabel dimensi Lokasi (dim_location) secara incremental.
     Primary Key: location_key (Surrogate Key, int berurut)
-    Komponen   : country, region, state, city, postal_code
     """
-    logger.info("Membentuk dim_location...")
+    logger.info("Sinkronisasi dim_location (Incremental Check)...")
+    existing_dim = get_existing_table("dim_location", output_dir)
+
     loc_cols = ["Country", "Region", "State", "City", "Postal Code"]
-    dim_loc = (
+    incoming_loc = (
         df_clean[loc_cols]
         .drop_duplicates()
         .sort_values(by=loc_cols)
-        .reset_index(drop=True)
+        .rename(columns={
+            "Country": "country",
+            "Region": "region",
+            "State": "state",
+            "City": "city",
+            "Postal Code": "postal_code"
+        })
     )
 
-    dim_loc.rename(columns={
-        "Country": "country",
-        "Region": "region",
-        "State": "state",
-        "City": "city",
-        "Postal Code": "postal_code"
-    }, inplace=True)
+    if existing_dim is None or existing_dim.empty:
+        incoming_loc.insert(0, "location_key", np.arange(1, len(incoming_loc) + 1, dtype=int))
+        logger.info(f"dim_location (Initial Load): {len(incoming_loc):,} lokasi dibuat.")
+        return incoming_loc
+    else:
+        # Merge dengan data lama untuk mengecek kombinasi lokasi yang belum ada
+        check_cols = ["country", "region", "state", "city", "postal_code"]
+        existing_dim[check_cols] = existing_dim[check_cols].astype(str)
+        incoming_loc[check_cols] = incoming_loc[check_cols].astype(str)
 
-    # Tambahkan Surrogate Key berurut (1..N)
-    dim_loc.insert(0, "location_key", dim_loc.index + 1)
-    logger.info(f"dim_location selesai: {len(dim_loc):,} lokasi unik.")
-    return dim_loc
+        merged = incoming_loc.merge(existing_dim, on=check_cols, how="left")
+        new_loc = merged[merged["location_key"].isna()][check_cols].copy()
+
+        if not new_loc.empty:
+            max_key = int(existing_dim["location_key"].max())
+            new_loc.insert(0, "location_key", np.arange(max_key + 1, max_key + 1 + len(new_loc), dtype=int))
+            updated_dim = pd.concat([existing_dim, new_loc], ignore_index=True)
+            logger.info(f"dim_location (Incremental): Menambahkan {len(new_loc):,} lokasi baru. Total: {len(updated_dim):,}.")
+            return updated_dim
+        else:
+            logger.info(f"dim_location (Incremental): Tidak ada lokasi baru. Total tetap: {len(existing_dim):,}.")
+            return existing_dim
 
 
-def create_dim_ship_mode(df_clean: pd.DataFrame) -> pd.DataFrame:
+def create_dim_ship_mode(df_clean: pd.DataFrame, output_dir: str = "dwh_output") -> pd.DataFrame:
     """
-    Membentuk tabel dimensi Moda Pengiriman (dim_ship_mode).
+    Membentuk / Memperbarui tabel dimensi Moda Pengiriman (dim_ship_mode).
     Primary Key: ship_mode_key (Surrogate Key, int berurut)
-    Unique Key : ship_mode
     """
-    logger.info("Membentuk dim_ship_mode...")
-    dim_ship = (
+    logger.info("Sinkronisasi dim_ship_mode (Incremental Check)...")
+    existing_dim = get_existing_table("dim_ship_mode", output_dir)
+
+    incoming_ship = (
         df_clean[["Ship Mode"]]
         .drop_duplicates()
         .sort_values(by="Ship Mode")
-        .reset_index(drop=True)
+        .rename(columns={"Ship Mode": "ship_mode"})
     )
 
-    dim_ship.rename(columns={"Ship Mode": "ship_mode"}, inplace=True)
+    if existing_dim is None or existing_dim.empty:
+        incoming_ship.insert(0, "ship_mode_key", np.arange(1, len(incoming_ship) + 1, dtype=int))
+        logger.info(f"dim_ship_mode (Initial Load): {len(incoming_ship):,} jenis pengiriman dibuat.")
+        return incoming_ship
+    else:
+        existing_modes = set(existing_dim["ship_mode"].astype(str))
+        new_ship = incoming_ship[~incoming_ship["ship_mode"].astype(str).isin(existing_modes)].copy()
 
-    # Tambahkan Surrogate Key berurut (1..N)
-    dim_ship.insert(0, "ship_mode_key", dim_ship.index + 1)
-    logger.info(f"dim_ship_mode selesai: {len(dim_ship):,} jenis pengiriman unik.")
-    return dim_ship
+        if not new_ship.empty:
+            max_key = int(existing_dim["ship_mode_key"].max())
+            new_ship.insert(0, "ship_mode_key", np.arange(max_key + 1, max_key + 1 + len(new_ship), dtype=int))
+            updated_dim = pd.concat([existing_dim, new_ship], ignore_index=True)
+            logger.info(f"dim_ship_mode (Incremental): Menambahkan {len(new_ship):,} jenis pengiriman baru.")
+            return updated_dim
+        else:
+            logger.info(f"dim_ship_mode (Incremental): Tidak ada jenis pengiriman baru.")
+            return existing_dim
 
 
-def create_dim_date(df_clean: pd.DataFrame) -> pd.DataFrame:
+def create_dim_date(df_clean: pd.DataFrame, output_dir: str = "dwh_output") -> pd.DataFrame:
     """
-    Membentuk tabel dimensi Waktu/Tanggal (dim_date).
-    Digenerate dari seluruh tanggal unik pada gabungan Order Date dan Ship Date.
+    Membentuk / Memperbarui tabel dimensi Waktu/Tanggal (dim_date) secara incremental.
     Primary Key: date_key (format integer: YYYYMMDD)
     """
-    logger.info("Membentuk dim_date...")
-    # Menggabungkan Order Date dan Ship Date untuk mendapatkan tanggal unik
+    logger.info("Sinkronisasi dim_date (Incremental Check)...")
+    existing_dim = get_existing_table("dim_date", output_dir)
+
     all_dates = pd.concat([df_clean["Order Date"], df_clean["Ship Date"]]).dropna().unique()
     unique_dates = pd.Series(all_dates).sort_values().reset_index(drop=True)
 
@@ -278,134 +346,164 @@ def create_dim_date(df_clean: pd.DataFrame) -> pd.DataFrame:
     dim_dt["month_name"] = dim_dt["full_date_dt"].dt.month_name()
     dim_dt["quarter"] = dim_dt["full_date_dt"].dt.quarter
     dim_dt["year"] = dim_dt["full_date_dt"].dt.year
+    dim_dt = dim_dt[["date_key", "full_date", "day", "month", "month_name", "quarter", "year"]]
 
-    dim_dt = dim_dt[[
-        "date_key", "full_date", "day", "month", "month_name", "quarter", "year"
-    ]]
+    if existing_dim is None or existing_dim.empty:
+        logger.info(f"dim_date (Initial Load): {len(dim_dt):,} tanggal kalender dibuat.")
+        return dim_dt
+    else:
+        existing_keys = set(existing_dim["date_key"].astype(int))
+        new_dates = dim_dt[~dim_dt["date_key"].astype(int).isin(existing_keys)].copy()
 
-    logger.info(
-        f"dim_date selesai: {len(dim_dt):,} tanggal unik "
-        f"({dim_dt['full_date'].min()} s/d {dim_dt['full_date'].max()})."
-    )
-    return dim_dt
+        if not new_dates.empty:
+            updated_dim = pd.concat([existing_dim, new_dates], ignore_index=True).sort_values(by="date_key").reset_index(drop=True)
+            logger.info(f"dim_date (Incremental): Menambahkan {len(new_dates):,} tanggal baru. Total: {len(updated_dim):,}.")
+            return updated_dim
+        else:
+            logger.info(f"dim_date (Incremental): Tidak ada tanggal baru. Total tetap: {len(existing_dim):,}.")
+            return existing_dim
 
 
 # ==============================================================================
-# 4. TAHAP FACT TABLES GENERATION
+# 4. TAHAP FACT TABLES GENERATION (INCREMENTAL)
 # ==============================================================================
 def create_fact_sales(
     df_clean: pd.DataFrame,
     dim_customer: pd.DataFrame,
     dim_product: pd.DataFrame,
     dim_location: pd.DataFrame,
-    dim_ship_mode: pd.DataFrame
+    dim_ship_mode: pd.DataFrame,
+    output_dir: str = "dwh_output"
 ) -> pd.DataFrame:
     """
-    Membentuk tabel fakta Penjualan Baris Item (fact_sales).
-    Granularitas: Satu baris untuk setiap item penjualan (Row ID).
-    Primary Key : sales_key (bigint berurut)
+    Membentuk / Menambahkan tabel fakta Penjualan (fact_sales) secara incremental.
+    Hanya menyertakan baris transaksi yang belum pernah tercatat (berdasarkan Row ID).
     """
-    logger.info("Membentuk fact_sales (Left Join dengan tabel dimensi)...")
-    fact = df_clean.copy()
+    logger.info("Sinkronisasi fact_sales (Incremental Check)...")
+    existing_fact = get_existing_table("fact_sales", output_dir)
+    
+    fact_batch = df_clean.copy()
+
+    # Cek apakah ada data historis untuk memfilter row_id yang sudah ada
+    if existing_fact is not None and not existing_fact.empty:
+        existing_row_ids = set(existing_fact["row_id"].astype(str))
+        fact_batch = fact_batch[~fact_batch["Row ID"].astype(str).isin(existing_row_ids)].copy()
+        logger.info(f"fact_sales: Ditemukan {len(fact_batch):,} transaksi baru yang belum tercatat di DWH.")
+        if fact_batch.empty:
+            logger.info("fact_sales: Tidak ada baris transaksi baru untuk ditambahkan.")
+            return existing_fact
+        max_sales_key = int(existing_fact["sales_key"].max())
+    else:
+        max_sales_key = 0
+        logger.info(f"fact_sales (Initial Load): Memproses seluruh {len(fact_batch):,} transaksi.")
 
     # Siapkan atribut asli dan foreign key tanggal (format YYYYMMDD)
-    fact["row_id"] = fact["Row ID"].astype(str)
-    fact["order_id"] = fact["Order ID"].astype(str)
-    fact["order_date_key"] = fact["Order Date"].dt.strftime("%Y%m%d").astype(int)
-    fact["ship_date_key"] = fact["Ship Date"].dt.strftime("%Y%m%d").astype(int)
-    fact["quantity"] = fact["Quantity"].astype(int)
-    fact["sales"] = fact["Sales"].astype(float)
-    fact["discount"] = fact["Discount"].astype(float)
-    fact["profit"] = fact["Profit"].astype(float)
+    fact_batch["row_id"] = fact_batch["Row ID"].astype(str)
+    fact_batch["order_id"] = fact_batch["Order ID"].astype(str)
+    fact_batch["order_date_key"] = fact_batch["Order Date"].dt.strftime("%Y%m%d").astype(int)
+    fact_batch["ship_date_key"] = fact_batch["Ship Date"].dt.strftime("%Y%m%d").astype(int)
+    fact_batch["quantity"] = fact_batch["Quantity"].astype(int)
+    fact_batch["sales"] = fact_batch["Sales"].astype(float)
+    fact_batch["discount"] = fact_batch["Discount"].astype(float)
+    fact_batch["profit"] = fact_batch["Profit"].astype(float)
 
     # 1. Join ke dim_customer
-    fact = fact.merge(
-        dim_customer[["customer_id", "customer_key"]],
+    fact_batch = fact_batch.merge(
+        dim_customer[["customer_id", "customer_key"]].astype({"customer_id": str}),
         left_on="Customer ID",
         right_on="customer_id",
         how="left"
     )
 
     # 2. Join ke dim_product
-    fact = fact.merge(
-        dim_product[["product_id", "product_key"]],
+    fact_batch = fact_batch.merge(
+        dim_product[["product_id", "product_key"]].astype({"product_id": str}),
         left_on="Product ID",
         right_on="product_id",
         how="left"
     )
 
     # 3. Join ke dim_location
-    fact = fact.merge(
-        dim_location[["country", "region", "state", "city", "postal_code", "location_key"]],
+    loc_dim_copy = dim_location[["country", "region", "state", "city", "postal_code", "location_key"]].copy()
+    for col in ["country", "region", "state", "city", "postal_code"]:
+        loc_dim_copy[col] = loc_dim_copy[col].astype(str)
+        fact_batch[col.capitalize() if col != "postal_code" else "Postal Code"] = fact_batch[col.capitalize() if col != "postal_code" else "Postal Code"].astype(str)
+
+    fact_batch = fact_batch.merge(
+        loc_dim_copy,
         left_on=["Country", "Region", "State", "City", "Postal Code"],
         right_on=["country", "region", "state", "city", "postal_code"],
         how="left"
     )
 
     # 4. Join ke dim_ship_mode
-    fact = fact.merge(
-        dim_ship_mode[["ship_mode", "ship_mode_key"]],
+    fact_batch = fact_batch.merge(
+        dim_ship_mode[["ship_mode", "ship_mode_key"]].astype({"ship_mode": str}),
         left_on="Ship Mode",
         right_on="ship_mode",
         how="left"
     )
 
-    # Generate Primary Key: sales_key (bigint)
-    fact.insert(0, "sales_key", np.arange(1, len(fact) + 1, dtype=np.int64))
+    # Generate Primary Key berlanjut dari max_sales_key
+    fact_batch.insert(0, "sales_key", np.arange(max_sales_key + 1, max_sales_key + 1 + len(fact_batch), dtype=np.int64))
 
-    # Susun kolom sesuai skema relasional fact_sales
+    # Susun kolom sesuai skema
     fact_columns = [
-        "sales_key",
-        "row_id",
-        "order_id",
-        "order_date_key",
-        "ship_date_key",
-        "customer_key",
-        "product_key",
-        "location_key",
-        "ship_mode_key",
-        "quantity",
-        "sales",
-        "discount",
-        "profit"
+        "sales_key", "row_id", "order_id", "order_date_key", "ship_date_key",
+        "customer_key", "product_key", "location_key", "ship_mode_key",
+        "quantity", "sales", "discount", "profit"
     ]
-    fact_sales = fact[fact_columns].copy()
+    new_fact_sales = fact_batch[fact_columns].copy()
 
     # Verifikasi Integritas Relasional
-    fk_check = fact_sales[[
+    fk_check = new_fact_sales[[
         "order_date_key", "ship_date_key", "customer_key",
         "product_key", "location_key", "ship_mode_key"
     ]].isna().sum()
 
     if fk_check.sum() > 0:
-        logger.warning(f"Terdeteksi nilai NULL pada Foreign Key fact_sales:\n{fk_check}")
+        logger.warning(f"Terdeteksi nilai NULL pada Foreign Key fact_sales batch baru:\n{fk_check}")
     else:
-        logger.info("Integritas Relasional fact_sales: 100% Foreign Key terpetakan sempurna (0 NULLs).")
+        logger.info("Integritas Relasional fact_sales batch baru: 100% Valid (0 NULLs).")
 
-    logger.info(f"fact_sales selesai: {len(fact_sales):,} baris transaksi.")
-    return fact_sales
+    if existing_fact is not None and not existing_fact.empty:
+        combined_fact = pd.concat([existing_fact, new_fact_sales], ignore_index=True)
+        logger.info(f"fact_sales (Incremental): Menambahkan {len(new_fact_sales):,} baris. Total: {len(combined_fact):,}.")
+        return combined_fact
+    else:
+        logger.info(f"fact_sales (Initial Load): {len(new_fact_sales):,} baris transaksi terbentuk.")
+        return new_fact_sales
 
 
 def create_fact_customer_order(
     fact_sales: pd.DataFrame,
-    dim_location: pd.DataFrame
+    dim_location: pd.DataFrame,
+    output_dir: str = "dwh_output"
 ) -> pd.DataFrame:
     """
-    Membentuk tabel fakta Pesanan Pelanggan (fact_customer_order).
-    Granularitas: Satu baris untuk setiap Order ID.
-    Primary Key : customer_order_key (bigint berurut)
-    Measures    : total_sales, total_quantity, total_profit, total_discount, product_line_count
+    Membentuk / Menambahkan tabel fakta Pesanan Pelanggan (fact_customer_order) secara incremental.
+    Granularitas: Satu baris per Order ID.
     """
-    logger.info("Membentuk fact_customer_order (Agregasi pada tingkat grain Order ID)...")
+    logger.info("Sinkronisasi fact_customer_order (Incremental Check)...")
+    existing_fact_order = get_existing_table("fact_customer_order", output_dir)
 
-    # Integrasikan informasi postal_code untuk memprioritaskan alamat valid dibandingkan '00000'
-    fact_with_loc = fact_sales.merge(
-        dim_location[["location_key", "postal_code"]],
-        on="location_key",
-        how="left"
-    )
+    # Jika sudah ada di DWH, ambil order_id yang belum pernah ada
+    if existing_fact_order is not None and not existing_fact_order.empty:
+        existing_order_ids = set(existing_fact_order["order_id"].astype(str))
+        fact_sales_subset = fact_sales[~fact_sales["order_id"].astype(str).isin(existing_order_ids)].copy()
+        if fact_sales_subset.empty:
+            logger.info("fact_customer_order: Tidak ada pesanan baru untuk ditambahkan.")
+            return existing_fact_order
+        max_order_key = int(existing_fact_order["customer_order_key"].max())
+    else:
+        fact_sales_subset = fact_sales.copy()
+        max_order_key = 0
 
-    # Prioritaskan entri dengan lokasi diketahui (bukan '00000') saat mengambil location_key pesanan
+    # Integrasikan informasi postal_code untuk memprioritaskan alamat valid
+    loc_subset = dim_location[["location_key", "postal_code"]].copy()
+    loc_subset["postal_code"] = loc_subset["postal_code"].astype(str)
+
+    fact_with_loc = fact_sales_subset.merge(loc_subset, on="location_key", how="left")
     fact_with_loc["is_unknown_loc"] = fact_with_loc["postal_code"].isin(["00000", "0", "Unknown"])
     fact_sorted = fact_with_loc.sort_values(by=["order_id", "is_unknown_loc"])
 
@@ -419,40 +517,26 @@ def create_fact_customer_order(
         total_quantity=("quantity", "sum"),
         total_profit=("profit", lambda x: np.round(x.sum(), 4)),
         total_discount=("discount", lambda x: np.round(x.sum(), 4)),
-        product_line_count=("sales_key", "count")  # Jumlah baris item produk dalam pesanan
+        product_line_count=("sales_key", "count")
     )
 
-    # Generate Primary Key: customer_order_key (bigint berurut)
-    fact_order.insert(0, "customer_order_key", np.arange(1, len(fact_order) + 1, dtype=np.int64))
+    # Generate Primary Key berlanjut
+    fact_order.insert(0, "customer_order_key", np.arange(max_order_key + 1, max_order_key + 1 + len(fact_order), dtype=np.int64))
 
-    # Susun kolom secara presisi sesuai spesifikasi skema
     fact_order_columns = [
-        "customer_order_key",
-        "order_id",
-        "customer_key",
-        "order_date_key",
-        "location_key",
-        "ship_mode_key",
-        "total_sales",
-        "total_quantity",
-        "total_profit",
-        "total_discount",
-        "product_line_count"
+        "customer_order_key", "order_id", "customer_key", "order_date_key",
+        "location_key", "ship_mode_key", "total_sales", "total_quantity",
+        "total_profit", "total_discount", "product_line_count"
     ]
-    fact_customer_order = fact_order[fact_order_columns].copy()
+    new_fact_order = fact_order[fact_order_columns].copy()
 
-    # Verifikasi Integritas Relasional
-    fk_check = fact_customer_order[[
-        "customer_key", "order_date_key", "location_key", "ship_mode_key"
-    ]].isna().sum()
-
-    if fk_check.sum() > 0:
-        logger.warning(f"Terdeteksi nilai NULL pada Foreign Key fact_customer_order:\n{fk_check}")
+    if existing_fact_order is not None and not existing_fact_order.empty:
+        combined_fact_order = pd.concat([existing_fact_order, new_fact_order], ignore_index=True)
+        logger.info(f"fact_customer_order (Incremental): Menambahkan {len(new_fact_order):,} pesanan. Total: {len(combined_fact_order):,}.")
+        return combined_fact_order
     else:
-        logger.info("Integritas Relasional fact_customer_order: 100% Foreign Key terpetakan sempurna (0 NULLs).")
-
-    logger.info(f"fact_customer_order selesai: {len(fact_customer_order):,} pesanan unik.")
-    return fact_customer_order
+        logger.info(f"fact_customer_order (Initial Load): {len(new_fact_order):,} pesanan unik terbentuk.")
+        return new_fact_order
 
 
 # ==============================================================================
@@ -543,27 +627,29 @@ def run_etl_pipeline(
         postal_code_fill=postal_code_fill
     )
 
-    # 3. MODEL (TRANSFORM II - STAR SCHEMA DIMENSIONS)
-    dim_customer = create_dim_customer(df_clean)
-    dim_product = create_dim_product(df_clean)
-    dim_location = create_dim_location(df_clean)
-    dim_ship_mode = create_dim_ship_mode(df_clean)
-    dim_date = create_dim_date(df_clean)
+    # 3. MODEL (TRANSFORM II - INCREMENTAL STAR SCHEMA DIMENSIONS)
+    dim_customer = create_dim_customer(df_clean, output_dir=output_dir)
+    dim_product = create_dim_product(df_clean, output_dir=output_dir)
+    dim_location = create_dim_location(df_clean, output_dir=output_dir)
+    dim_ship_mode = create_dim_ship_mode(df_clean, output_dir=output_dir)
+    dim_date = create_dim_date(df_clean, output_dir=output_dir)
 
-    # 4. FACT TABLES GENERATION
+    # 4. FACT TABLES GENERATION (INCREMENTAL)
     # 4.1 Tabel Fakta 1: fact_sales (Grain: Item Penjualan / Line Item)
     fact_sales = create_fact_sales(
         df_clean=df_clean,
         dim_customer=dim_customer,
         dim_product=dim_product,
         dim_location=dim_location,
-        dim_ship_mode=dim_ship_mode
+        dim_ship_mode=dim_ship_mode,
+        output_dir=output_dir
     )
 
     # 4.2 Tabel Fakta 2: fact_customer_order (Grain: Order ID Header)
     fact_customer_order = create_fact_customer_order(
         fact_sales=fact_sales,
-        dim_location=dim_location
+        dim_location=dim_location,
+        output_dir=output_dir
     )
 
     # 5. LOAD
