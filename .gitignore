@@ -3,3 +3,7 @@ logs/*.log
 
 # Pengecualian: jangan abaikan file .gitkeep
 !logs/.gitkeep
+
+dwh_output/*
+
+!dwh_output/.gitkeep
