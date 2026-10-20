@@ -1,0 +1,8 @@
+table,check,columns,duplicate_count
+superstore_dirty.csv,Full row duplicates,*,95
+dim_customer.csv,Full row duplicates,*,0
+dim_date.csv,Full row duplicates,*,0
+dim_location.csv,Full row duplicates,*,0
+dim_product.csv,Full row duplicates,*,0
+dim_ship_mode.csv,Full row duplicates,*,0
+fact_sales.csv,Full row duplicates,*,0

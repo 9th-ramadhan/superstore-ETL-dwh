@@ -1,0 +1,59 @@
+table,column,row_count,null_count,null_percentage
+superstore_dirty.csv,Row ID,10093,0,0.0
+superstore_dirty.csv,Order ID,10093,0,0.0
+superstore_dirty.csv,Order Date,10093,0,0.0
+superstore_dirty.csv,Ship Date,10093,0,0.0
+superstore_dirty.csv,Ship Mode,10093,0,0.0
+superstore_dirty.csv,Customer ID,10093,0,0.0
+superstore_dirty.csv,Customer Name,10093,200,1.98
+superstore_dirty.csv,Segment,10093,0,0.0
+superstore_dirty.csv,Country,10093,0,0.0
+superstore_dirty.csv,City,10093,0,0.0
+superstore_dirty.csv,State,10093,0,0.0
+superstore_dirty.csv,Postal Code,10093,200,1.98
+superstore_dirty.csv,Region,10093,0,0.0
+superstore_dirty.csv,Product ID,10093,0,0.0
+superstore_dirty.csv,Category,10093,0,0.0
+superstore_dirty.csv,Sub-Category,10093,0,0.0
+superstore_dirty.csv,Product Name,10093,200,1.98
+superstore_dirty.csv,Sales,10093,0,0.0
+superstore_dirty.csv,Quantity,10093,0,0.0
+superstore_dirty.csv,Discount,10093,0,0.0
+superstore_dirty.csv,Profit,10093,0,0.0
+dim_customer.csv,customer_key,793,0,0.0
+dim_customer.csv,customer_id,793,0,0.0
+dim_customer.csv,customer_name,793,0,0.0
+dim_customer.csv,segment,793,0,0.0
+dim_date.csv,date_key,1434,0,0.0
+dim_date.csv,full_date,1434,0,0.0
+dim_date.csv,day,1434,0,0.0
+dim_date.csv,month,1434,0,0.0
+dim_date.csv,month_name,1434,0,0.0
+dim_date.csv,quarter,1434,0,0.0
+dim_date.csv,year,1434,0,0.0
+dim_location.csv,location_key,733,0,0.0
+dim_location.csv,country,733,0,0.0
+dim_location.csv,region,733,0,0.0
+dim_location.csv,state,733,0,0.0
+dim_location.csv,city,733,0,0.0
+dim_location.csv,postal_code,733,0,0.0
+dim_product.csv,product_key,1861,0,0.0
+dim_product.csv,product_id,1861,0,0.0
+dim_product.csv,product_name,1861,0,0.0
+dim_product.csv,category,1861,0,0.0
+dim_product.csv,sub_category,1861,0,0.0
+dim_ship_mode.csv,ship_mode_key,4,0,0.0
+dim_ship_mode.csv,ship_mode,4,0,0.0
+fact_sales.csv,sales_key,9894,0,0.0
+fact_sales.csv,row_id,9894,0,0.0
+fact_sales.csv,order_id,9894,0,0.0
+fact_sales.csv,order_date_key,9894,0,0.0
+fact_sales.csv,ship_date_key,9894,0,0.0
+fact_sales.csv,customer_key,9894,0,0.0
+fact_sales.csv,product_key,9894,0,0.0
+fact_sales.csv,location_key,9894,0,0.0
+fact_sales.csv,ship_mode_key,9894,0,0.0
+fact_sales.csv,quantity,9894,0,0.0
+fact_sales.csv,sales,9894,0,0.0
+fact_sales.csv,discount,9894,0,0.0
+fact_sales.csv,profit,9894,0,0.0

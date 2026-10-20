@@ -1,0 +1,90 @@
+{
+    "tables": [
+        {
+            "table": "superstore_dirty.csv",
+            "row_count": 10093,
+            "column_count": 21,
+            "total_null_cells": 600,
+            "full_row_duplicates": 95
+        },
+        {
+            "table": "dim_customer.csv",
+            "row_count": 793,
+            "column_count": 4,
+            "total_null_cells": 0,
+            "full_row_duplicates": 0
+        },
+        {
+            "table": "dim_date.csv",
+            "row_count": 1434,
+            "column_count": 7,
+            "total_null_cells": 0,
+            "full_row_duplicates": 0
+        },
+        {
+            "table": "dim_location.csv",
+            "row_count": 733,
+            "column_count": 6,
+            "total_null_cells": 0,
+            "full_row_duplicates": 0
+        },
+        {
+            "table": "dim_product.csv",
+            "row_count": 1861,
+            "column_count": 5,
+            "total_null_cells": 0,
+            "full_row_duplicates": 0
+        },
+        {
+            "table": "dim_ship_mode.csv",
+            "row_count": 4,
+            "column_count": 2,
+            "total_null_cells": 0,
+            "full_row_duplicates": 0
+        },
+        {
+            "table": "fact_sales.csv",
+            "row_count": 9894,
+            "column_count": 13,
+            "total_null_cells": 0,
+            "full_row_duplicates": 0
+        }
+    ],
+    "key_integrity": [
+        {
+            "check": "Dimension primary key",
+            "table": "dim_customer.csv",
+            "column": "Customer ID",
+            "issue_count": null,
+            "status": "Kolom kunci tidak ditemukan"
+        },
+        {
+            "check": "Dimension primary key",
+            "table": "dim_date.csv",
+            "column": "Date Key",
+            "issue_count": null,
+            "status": "Kolom kunci tidak ditemukan"
+        },
+        {
+            "check": "Dimension primary key",
+            "table": "dim_location.csv",
+            "column": "Location Key",
+            "issue_count": null,
+            "status": "Kolom kunci tidak ditemukan"
+        },
+        {
+            "check": "Dimension primary key",
+            "table": "dim_product.csv",
+            "column": "Product ID",
+            "issue_count": null,
+            "status": "Kolom kunci tidak ditemukan"
+        },
+        {
+            "check": "Dimension primary key",
+            "table": "dim_ship_mode.csv",
+            "column": "Ship Mode Key",
+            "issue_count": null,
+            "status": "Kolom kunci tidak ditemukan"
+        }
+    ]
+}

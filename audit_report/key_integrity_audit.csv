@@ -1,0 +1,6 @@
+check,table,column,issue_count,status
+Dimension primary key,dim_customer.csv,Customer ID,,Kolom kunci tidak ditemukan
+Dimension primary key,dim_date.csv,Date Key,,Kolom kunci tidak ditemukan
+Dimension primary key,dim_location.csv,Location Key,,Kolom kunci tidak ditemukan
+Dimension primary key,dim_product.csv,Product ID,,Kolom kunci tidak ditemukan
+Dimension primary key,dim_ship_mode.csv,Ship Mode Key,,Kolom kunci tidak ditemukan
