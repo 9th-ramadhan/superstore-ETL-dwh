@@ -1,24 +1,32 @@
 """
-ETL Pipeline: Superstore Sales Data to Star Schema Data Warehouse
-==================================================================
+ETL Pipeline: Superstore Sales Data (OLTP to Star Schema Data Warehouse)
+========================================================================
 Script ini melakukan proses Extract, Transform, dan Load (ETL) end-to-end:
-1. Extract  : Membaca dataset transaksi mentah dari CSV.
+1. Extract  : Membaca dataset transaksi mentah dari tabel MySQL OLTP.
 2. Clean    : Menangani Missing Values, Duplikasi Data, dan Anomali Logika Bisnis.
 3. Model    : Membentuk tabel dimensi (dim_customer, dim_product, dim_location,
               dim_ship_mode, dim_date) dengan Surrogate Keys berurut.
 4. Fact Gen : Membentuk dua tabel fakta:
               - fact_sales          : Granularitas per baris item produk (sales line item)
               - fact_customer_order : Granularitas per Order ID (order header summary)
-5. Load     : Mengekspor seluruh tabel dimensi dan fakta ke format CSV di dwh_output/.
+5. Load     : Memuat seluruh tabel dimensi dan fakta ke Data Warehouse MySQL
+              dan mengekspor salinan ke format CSV di dwh_output/.
 
-Author: Data Engineering Expert
+Author: Senior Data Engineer
 """
 
 import os
+import re
 import logging
+from urllib.parse import quote_plus
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from dotenv import load_dotenv
+
+# Memuat variabel lingkungan dari file .env jika tersedia
+load_dotenv()
 
 # Konfigurasi logging standar industri untuk memantau siklus hidup ETL
 logging.basicConfig(
@@ -30,18 +38,166 @@ logger = logging.getLogger("ETL_Pipeline")
 
 
 # ==============================================================================
+# HELPER: KONEKSI DATABASE & VALIDASI SQL
+# ==============================================================================
+def validate_sql_identifier(identifier: str) -> str:
+    """
+    Validasi SQL identifier (nama database, tabel) untuk mencegah SQL Injection.
+    Hanya mengizinkan karakter alfanumerik dan underscore.
+    """
+    if not identifier or not re.match(r"^[a-zA-Z0-9_]+$", str(identifier)):
+        raise ValueError(
+            f"Identifier SQL '{identifier}' tidak valid. "
+            f"Hanya karakter alfanumerik dan underscore yang diperbolehkan."
+        )
+    return str(identifier)
+
+
+def get_database_engine(prefix: str = "DWH", default_db: str = "superstore_dwh") -> Engine:
+    """
+    Membangun SQLAlchemy Engine untuk MySQL menggunakan konfigurasi environment variables.
+    Parameter:
+        prefix (str): 'OLTP' untuk database sumber atau 'DWH' untuk target data warehouse.
+        default_db (str): Nama database default jika env var tidak ditentukan.
+    """
+    host = os.getenv(f"{prefix}_DB_HOST", "localhost")
+    port = os.getenv(f"{prefix}_DB_PORT", "3306")
+    user = os.getenv(f"{prefix}_DB_USER", "root")
+    password = os.getenv(f"{prefix}_DB_PASSWORD", "")
+    database = os.getenv(f"{prefix}_DB_NAME", default_db)
+
+    # URL-encode password untuk menangani karakter khusus dengan aman
+    auth_part = f"{user}:{quote_plus(password)}" if password else f"{user}:"
+    connection_string = f"mysql+pymysql://{auth_part}@{host}:{port}/{database}"
+
+    return create_engine(connection_string)
+
+
+# ==============================================================================
 # 1. TAHAP EXTRACT
 # ==============================================================================
-def extract_data(file_path: str) -> pd.DataFrame:
+def extract_data(
+    engine: Engine | None = None,
+    table_name: str | None = None
+) -> pd.DataFrame:
     """
-    Mengekstrak data transaksi mentah dari file CSV sumber.
+    Mengekstrak data transaksi mentah langsung dari database MySQL OLTP.
+    Secara default mengekstrak melalui query relasional (JOIN 8 tabel ternormalisasi:
+    order_items, orders, customers, products, subcategories, categories, locations, ship_modes)
+    sehingga mencerminkan sumber transaksi sungguhan namun tetap mempertahankan
+    seluruh anomali data mentah (NULL, tanggal terbalik, duplikat) untuk dibersihkan
+    pada tahap Transform.
     """
-    logger.info(f"Memulai proses Extract dari: {file_path}")
+    # 1. Verifikasi ketersediaan driver pymysql
+    try:
+        import pymysql
+    except ImportError:
+        logger.error(
+            "Driver 'pymysql' belum terpasang. Jalankan 'pip install pymysql cryptography' "
+            "untuk mengaktifkan koneksi ke MySQL."
+        )
+        raise
+
+    # 2. Inisialisasi engine database OLTP
+    if engine is None:
+        engine = get_database_engine(prefix="OLTP", default_db="superstore_oltp")
+
+    db_name = engine.url.database or "superstore_oltp"
+    logger.info(
+        f"Memulai proses Extract dari MySQL OLTP "
+        f"({engine.url.host}:{engine.url.port}/{db_name})..."
+    )
+
+    # 3. Validasi koneksi dan pengecekan keberadaan tabel relasional
+    try:
+        with engine.connect() as conn:
+            # Periksa ketersediaan tabel transaksi utama order_items
+            check_table_sql = text(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = :db_name AND table_name = 'order_items'"
+            )
+            has_order_items = conn.execute(
+                check_table_sql,
+                {"db_name": db_name}
+            ).scalar()
+
+            if has_order_items:
+                logger.info("Mengekstrak data dari skema relasional OLTP (JOIN 8 tabel: orders, order_items, customers, products, dll)...")
+                relational_query = text("""
+                SELECT
+                    oi.row_id AS `Row ID`,
+                    o.order_id AS `Order ID`,
+                    o.order_date AS `Order Date`,
+                    oi.ship_date AS `Ship Date`,
+                    sm.ship_mode_name AS `Ship Mode`,
+                    c.customer_id AS `Customer ID`,
+                    oi.customer_name AS `Customer Name`,
+                    c.segment AS `Segment`,
+                    loc.country AS `Country`,
+                    loc.city AS `City`,
+                    loc.state AS `State`,
+                    loc.postal_code AS `Postal Code`,
+                    loc.region AS `Region`,
+                    p.product_id AS `Product ID`,
+                    cat.category_name AS `Category`,
+                    sc.subcategory_name AS `Sub-Category`,
+                    oi.product_name AS `Product Name`,
+                    oi.sales AS `Sales`,
+                    oi.quantity AS `Quantity`,
+                    oi.discount AS `Discount`,
+                    oi.profit AS `Profit`
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.order_id
+                JOIN customers c ON o.customer_id = c.customer_id
+                JOIN products p ON oi.product_id = p.product_id
+                JOIN subcategories sc ON p.subcategory_id = sc.subcategory_id
+                JOIN categories cat ON sc.category_id = cat.category_id
+                JOIN locations loc ON oi.location_id = loc.location_id
+                JOIN ship_modes sm ON o.ship_mode_id = sm.ship_mode_id
+                ORDER BY oi.order_item_id ASC;
+                """)
+                df = pd.read_sql_query(relational_query, conn)
+            else:
+                # Fallback jika hanya tabel flat superstore_raw yang tersedia
+                target_table = validate_sql_identifier(table_name or os.getenv("OLTP_TABLE_NAME", "superstore_raw"))
+                check_raw_sql = text(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema = :db_name AND table_name = :tbl_name"
+                )
+                raw_exists = conn.execute(check_raw_sql, {"db_name": db_name, "tbl_name": target_table}).scalar()
+                if not raw_exists:
+                    raise ValueError(
+                        f"Tabel sumber 'order_items' maupun '{target_table}' tidak ditemukan di database '{db_name}'. "
+                        f"Pastikan database OLTP telah dibuat dan diisi data "
+                        f"(jalankan 'python seed_oltp.py' atau 'sql/oltp_schema.sql')."
+                    )
+                logger.info(f"Mengekstrak data dari tabel tunggal '{target_table}'...")
+                query = text(f"SELECT * FROM `{target_table}`")
+                df = pd.read_sql_query(query, conn)
+
+    except Exception as e:
+        logger.error(f"Gagal melakukan proses Extract dari database MySQL OLTP: {e}")
+        logger.warning(
+            "Tips: Pastikan layanan MySQL aktif, konfigurasi OLTP pada .env benar, "
+            "dan database sumber sudah diinisialisasi dengan 'python seed_oltp.py'."
+        )
+        raise
+
+    logger.info(f"Extract berhasil. Baris mentah: {len(df):,}, Kolom: {df.shape[1]}")
+    return df
+
+
+def extract_data_from_csv(file_path: str = "data_source/superstore_dirty.csv") -> pd.DataFrame:
+    """
+    Fungsi utilitas ekstraksi alternatif langsung dari file CSV lokal.
+    Dipertahankan untuk pengujian isolasi dan benchmarking.
+    """
+    logger.info(f"Memulai proses Extract alternatif dari CSV: {file_path}")
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File sumber tidak ditemukan di path: {file_path}")
 
     df = pd.read_csv(file_path)
-    logger.info(f"Extract berhasil. Baris mentah: {len(df):,}, Kolom: {df.shape[1]}")
+    logger.info(f"Extract CSV berhasil. Baris mentah: {len(df):,}, Kolom: {df.shape[1]}")
     return df
 
 
@@ -94,11 +250,11 @@ def clean_data(
     null_postal = df["Postal Code"].isna().sum()
     if postal_code_fill == "00000":
         df["Postal Code"] = df["Postal Code"].apply(
-            lambda x: f"{int(x):05d}" if pd.notnull(x) else "00000"
+            lambda x: f"{int(float(x)):05d}" if pd.notnull(x) and str(x).strip() != "" else "00000"
         )
     else:
         df["Postal Code"] = df["Postal Code"].apply(
-            lambda x: f"{int(x):05d}" if pd.notnull(x) else str(postal_code_fill)
+            lambda x: f"{int(float(x)):05d}" if pd.notnull(x) and str(x).strip() != "" else str(postal_code_fill)
         )
     logger.info(f"[Imputasi NULL] Mengisi {null_postal:,} nilai NULL pada 'Postal Code' dengan '{postal_code_fill}'.")
 
@@ -144,9 +300,6 @@ def clean_data(
     return df
 
 
-# ==============================================================================
-# 3. TAHAP MODEL (TRANSFORM II - STAR SCHEMA DIMENSIONS)
-# ==============================================================================
 # ==============================================================================
 # 3. TAHAP MODEL (TRANSFORM II - INCREMENTAL DIMENSIONAL MODELING)
 # ==============================================================================
@@ -274,7 +427,6 @@ def create_dim_location(df_clean: pd.DataFrame, output_dir: str = "dwh_output") 
         logger.info(f"dim_location (Initial Load): {len(incoming_loc):,} lokasi dibuat.")
         return incoming_loc
     else:
-        # Merge dengan data lama untuk mengecek kombinasi lokasi yang belum ada
         check_cols = ["country", "region", "state", "city", "postal_code"]
         existing_dim[check_cols] = existing_dim[check_cols].astype(str)
         incoming_loc[check_cols] = incoming_loc[check_cols].astype(str)
@@ -554,14 +706,20 @@ def load_to_dwh(tables: dict, output_dir: str = "dwh_output") -> None:
         df_table.to_csv(file_path, index=False)
         logger.info(f"  [SAVED] {table_name:<20} -> {file_path} ({len(df_table):,} baris, {df_table.shape[1]} kolom)")
 
-    logger.info("Tahap Load selesai dengan sukses.")
+    logger.info("Tahap Load ke CSV selesai dengan sukses.")
 
-def load_to_mysql(tables: dict, db_connection_string: str) -> None:
+
+def load_to_mysql(
+    tables: dict,
+    engine: Engine | None = None,
+    db_connection_string: str | None = None
+) -> None:
     """
-    Menyimpan seluruh DataFrame dimensi dan fakta LANGSUNG ke database MySQL.
+    Menyimpan seluruh DataFrame dimensi dan fakta LANGSUNG ke database MySQL DWH.
+    Menggunakan konfigurasi terpusat atau engine yang disediakan.
     """
-    logger.info("Memulai tahap Load langsung ke MySQL...")
-    
+    logger.info("Memulai tahap Load langsung ke MySQL Data Warehouse...")
+
     # 1. Pengecekan driver pymysql
     try:
         import pymysql
@@ -572,53 +730,74 @@ def load_to_mysql(tables: dict, db_connection_string: str) -> None:
         )
         return
 
-    # 2. Uji koneksi ke database MySQL
+    # 2. Uji koneksi ke database MySQL DWH
     try:
-        engine = create_engine(db_connection_string)
+        if engine is None:
+            if db_connection_string:
+                engine = create_engine(db_connection_string)
+            else:
+                engine = get_database_engine(prefix="DWH", default_db="superstore_dwh")
+
         with engine.connect() as conn:
-            logger.info("Berhasil terhubung ke database MySQL.")
+            logger.info(f"Berhasil terhubung ke database MySQL DWH: {engine.url.database}")
     except Exception as e:
-        logger.error(f"Gagal terhubung ke database MySQL: {e}")
+        logger.error(f"Gagal terhubung ke database MySQL DWH: {e}")
         logger.warning(
-            "Tips: Pastikan MySQL Server (misal XAMPP/Wamp/MySQL Service) sedang aktif "
-            "dan database tujuan ('superstore_dwh') sudah dibuat terlebih dahulu."
+            "Tips: Pastikan MySQL Server sedang aktif dan database tujuan ('superstore_dwh') "
+            "sudah dibuat terlebih dahulu (jalankan 'sql/dwh_schema.sql')."
         )
         return
 
-    # 3. Looping untuk mengirim setiap tabel ke MySQL
-    for table_name, df_table in tables.items():
-        try:
-            logger.info(f"Mengirim tabel {table_name} ke MySQL...")
-            df_table.to_sql(
-                name=table_name,
-                con=engine,
-                if_exists="replace", 
-                index=False
-            )
-            logger.info(f"  [SUCCESS] {table_name:<20} berhasil dimuat ({len(df_table):,} baris)")
-        except Exception as e:
-            logger.error(f"  [FAILED] Gagal memuat tabel {table_name}: {e}")
+    # 3. Looping untuk mengirim setiap tabel ke MySQL dengan aman
+    try:
+        with engine.connect() as conn:
+            # Nonaktifkan sementara pemeriksaan foreign key agar replace table dimensi & fakta dapat berjalan
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+            for table_name, df_table in tables.items():
+                try:
+                    logger.info(f"Mengirim tabel {table_name} ke MySQL...")
+                    df_table.to_sql(
+                        name=table_name,
+                        con=conn,
+                        if_exists="replace",
+                        index=False
+                    )
+                    logger.info(f"  [SUCCESS] {table_name:<20} berhasil dimuat ({len(df_table):,} baris)")
+                except Exception as e:
+                    logger.error(f"  [FAILED] Gagal memuat tabel {table_name}: {e}")
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Gagal melakukan proses penulisan ke database MySQL DWH: {e}")
 
-    logger.info("Tahap Load ke MySQL selesai.")
+    logger.info("Tahap Load ke MySQL DWH selesai.")
+
 
 # ==============================================================================
 # PIPELINE ORCHESTRATOR
 # ==============================================================================
 def run_etl_pipeline(
-    source_csv_path: str = "data_source/superstore_dirty.csv",
+    oltp_table_name: str | None = None,
     output_dir: str = "dwh_output",
     inverted_date_strategy: str = "swap",
-    postal_code_fill: str = "00000"
+    postal_code_fill: str = "00000",
+    load_mysql: bool | None = None
 ):
     """
-    Fungsi utama orchestrator yang menjalankan seluruh tahapan ETL.
+    Fungsi utama orchestrator yang menjalankan seluruh tahapan ETL dari MySQL OLTP ke DWH.
+    Parameter:
+        oltp_table_name: Nama tabel sumber di database OLTP (default dari env atau 'superstore_raw').
+        output_dir: Direktori tempat menyimpan salinan data warehouse dalam format CSV.
+        inverted_date_strategy: Strategi anomali tanggal ('swap' atau 'drop').
+        postal_code_fill: Nilai default imputasi untuk postal code yang hilang ('00000').
+        load_mysql: Opsi untuk memuat hasil ke MySQL DWH (default membaca dari env LOAD_TO_MYSQL).
     """
     logger.info("=" * 70)
-    logger.info("MEMULAI PIPELINE ETL SUPERSTORE KE DATA WAREHOUSE (STAR SCHEMA)")
+    logger.info("MEMULAI PIPELINE ETL SUPERSTORE: MYSQL OLTP -> DATA WAREHOUSE (STAR SCHEMA)")
     logger.info("=" * 70)
 
-    # 1. EXTRACT
-    df_raw = extract_data(source_csv_path)
+    # 1. EXTRACT (Dari MySQL OLTP)
+    df_raw = extract_data(table_name=oltp_table_name)
 
     # 2. CLEAN (TRANSFORM I)
     df_clean = clean_data(
@@ -662,15 +841,18 @@ def run_etl_pipeline(
         "fact_sales": fact_sales,
         "fact_customer_order": fact_customer_order
     }
-    
+
     # 5.1 Load ke CSV (DWH Output Directory)
     load_to_dwh(dwh_tables, output_dir=output_dir)
 
-    # 5.2 Load ke MySQL (Opsional, pastikan MySQL aktif & pymysql terpasang)
-    # Ubah load_mysql=True jika ingin langsung memuat data ke MySQL
-    load_mysql = True
+    # 5.2 Load ke MySQL DWH
+    if load_mysql is None:
+        load_mysql_env = os.getenv("LOAD_TO_MYSQL", "true").lower()
+        load_mysql = load_mysql_env in ("true", "1", "yes")
+
     if load_mysql:
-        load_to_mysql(dwh_tables, db_connection_string="mysql+pymysql://root:@localhost:3306/superstore_dwh")
+        dwh_engine = get_database_engine(prefix="DWH", default_db="superstore_dwh")
+        load_to_mysql(dwh_tables, engine=dwh_engine)
 
     logger.info("=" * 70)
     logger.info("PIPELINE ETL SELESAI DENGAN SUKSES!")

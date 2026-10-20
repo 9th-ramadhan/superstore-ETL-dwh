@@ -1,10 +1,25 @@
+# Environment variables & secrets
+.env
+.env.local
+*.env
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
 # Mengabaikan semua file .log di dalam folder logs
 logs/*.log
 
 # Pengecualian: jangan abaikan file .gitkeep
 !logs/.gitkeep
 
+# DWH Output files
 dwh_output/*
-
 !dwh_output/.gitkeep
+
+# Backup files
 *.bkp

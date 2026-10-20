@@ -1,4 +1,4 @@
 table,rule,invalid_count,description
-superstore_dirty.csv,Sales < 0,0,Periksa retur atau nilai penjualan negatif
-superstore_dirty.csv,Quantity <= 0,100,Periksa kuantitas nol atau negatif
-superstore_dirty.csv,Ship Date < Order Date,100,Tanggal pengiriman mendahului tanggal pesanan
+superstore_oltp.superstore_raw,Sales < 0,0,Periksa retur atau nilai penjualan negatif
+superstore_oltp.superstore_raw,Quantity <= 0,100,Periksa kuantitas nol atau negatif
+superstore_oltp.superstore_raw,Ship Date < Order Date,100,Tanggal pengiriman mendahului tanggal pesanan

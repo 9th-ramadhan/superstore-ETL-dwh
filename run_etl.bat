@@ -28,8 +28,14 @@ echo [START] Menjalankan ETL Pipeline: %DATE% %TIME% >> "%LOG_FILE%"
 echo Direktori Proyek : %PROJECT_DIR% >> "%LOG_FILE%"
 echo ============================================================================== >> "%LOG_FILE%"
 
-:: 4. Deteksi Executable Python (Anaconda / Venv / Sistem)
-if exist "C:\Users\user\anaconda3\python.exe" (
+:: 4. Deteksi Executable Python (Venv / Path Terpasang / Anaconda / Sistem)
+if exist "%PROJECT_DIR%.venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
+) else if exist "%PROJECT_DIR%venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%PROJECT_DIR%venv\Scripts\python.exe"
+) else if exist "C:\Users\edy\AppData\Local\Programs\Python\Python312\python.exe" (
+    set "PYTHON_EXE=C:\Users\edy\AppData\Local\Programs\Python\Python312\python.exe"
+) else if exist "C:\Users\user\anaconda3\python.exe" (
     set "PYTHON_EXE=C:\Users\user\anaconda3\python.exe"
 ) else if exist "C:\Users\user\anaconda3\envs\hackathon\python.exe" (
     set "PYTHON_EXE=C:\Users\user\anaconda3\envs\hackathon\python.exe"

@@ -278,15 +278,26 @@ def audit_dwh_keys(tables):
 def main():
     tables = {}
 
-    # Baca data sumber.
-    source = read_csv(SOURCE_FILE)
+    # Baca data sumber dari MySQL OLTP jika tersedia, fallback ke CSV
+    source = None
+    source_name = "superstore_dirty.csv"
+    try:
+        from etl_pipeline import extract_data
+        source = extract_data()
+        source_name = "superstore_oltp.superstore_raw"
+        print("[INFO] Berhasil membaca data sumber mentah dari MySQL OLTP ('superstore_raw').")
+    except Exception as e:
+        print(f"[INFO] Koneksi MySQL OLTP tidak aktif/gagal ({e}). Menggunakan fallback CSV: {SOURCE_FILE}")
+        source = read_csv(SOURCE_FILE)
 
     if source is None:
         raise FileNotFoundError(
-            f"Data sumber tidak ditemukan: {SOURCE_FILE}"
+            f"Data sumber tidak ditemukan di MySQL OLTP maupun CSV: {SOURCE_FILE}"
         )
 
-    tables["superstore_dirty.csv"] = source
+    # Normalisasi string kosong menjadi NULL pada data sumber
+    source = source.replace(r"^\s*$", pd.NA, regex=True)
+    tables[source_name] = source
 
     # Baca seluruh tabel DWH.
     for filename in [*DIMENSIONS.keys(), FACT_FILE]:

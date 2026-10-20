@@ -1,7 +1,7 @@
 {
     "tables": [
         {
-            "table": "superstore_dirty.csv",
+            "table": "superstore_oltp.superstore_raw",
             "row_count": 10093,
             "column_count": 21,
             "total_null_cells": 600,
@@ -23,7 +23,7 @@
         },
         {
             "table": "dim_location.csv",
-            "row_count": 733,
+            "row_count": 1804,
             "column_count": 6,
             "total_null_cells": 0,
             "full_row_duplicates": 0
